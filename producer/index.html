@@ -158,6 +158,7 @@ body.phone .bl .bt b{font-size:13px}
 @keyframes rot{0%,20%{transform:rotate(0)}55%,100%{transform:rotate(-90deg)}}
 body.needrotate #rotate{display:flex}
 .th{display:none}.touch .th{display:inline}.touch .kh,.touch .k0{display:none}
+#btnVoice.voff{color:#ff8a8a;border-color:#7a2a2a;background:#2a0d0d}
 #brand .pc{color:#ffb23e}
 #ou{font-size:15px;font-weight:900;padding:3px 10px;border-radius:4px;background:#0a0c10;border:1px solid var(--line)}
 #ou.under{color:#6fb6ff}#ou.over{color:#ff6b6b}#ou.ok{color:#26e06a}
@@ -309,10 +310,12 @@ body.phone .glos{grid-template-columns:1fr;font-size:12px}
   <p style="color:#ffb23e">⏱ Time is compressed. Game coverage runs about 4× real time, the body of a break 16×, and long stoppages 8×. The TIME chip shows the current rate. Each show is about 5–8 minutes in real time.</p>
   <div class="shows" id="showCards"></div>
   <div class="toggles">
-    <label>Director voice <select id="optVoiceMode"><option value="off">Off</option><option value="synth">Synth</option><option value="mine">Mine (Director Booth pack)</option></select></label>
+    <label>Director voice <select id="optVoiceMode"><option value="synth">Synth</option><option value="mine">Mine (Director Booth pack)</option><option value="off">Off</option></select></label>
+    <button class="tbtn" id="optTest" type="button">▶ TEST VOICE</button>
     <label><input type="checkbox" id="optTalent" checked> Talent &amp; crew synthesized voice</label>
     <label><input type="checkbox" id="optSound" checked> Sound</label>
   </div>
+  <div id="vNotice" style="display:none;margin-top:8px;color:#ffd76a;font-size:13px"></div>
   <p style="margin-top:14px"><button class="bigbtn" id="menuBooth">🎙 DIRECTOR BOOTH</button><button class="bigbtn alt" id="menuImport">⇧ IMPORT VOICE PACK</button><button class="bigbtn alt" id="menuHelp">HOW TO PRODUCE / TERMS</button> <span id="vpCount" style="color:#9fe8ff"></span></p>
   <p>Want to sit in the TD chair instead? <a class="xlink" href="../">▶ Play TD Chair (the switcher game)</a></p>
 </div></div>
@@ -522,10 +525,33 @@ const sfx={
   good:()=>{tone(880,.07,'sine',.05);tone(1320,.09,'sine',.05,.07);},
   bad:()=>{tone(180,.25,'sawtooth',.06);tone(140,.3,'sawtooth',.05,.05);}
 };
-function speak(text,urgent){
-  if(!('speechSynthesis' in window))return;
-  try{ if(urgent)speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text.replace(/…/g,', ')); u.rate=urgent?1.3:1.12; u.pitch=.9; speechSynthesis.speak(u);}catch(e){}
+/* ---- speech synthesis, hardened for iOS Safari ----
+   iOS drops speak() calls until one has been made inside a user gesture, can get stuck "paused",
+   may garbage-collect utterances mid-sentence (onend never fires), and getVoices() is [] until 'voiceschanged'. */
+const HAS_TTS='speechSynthesis' in window && typeof SpeechSynthesisUtterance!=='undefined';
+const TTS={keep:[],voice:null,n:0,started:0,ended:0,errors:0,last:'',lastErr:'',primed:0,cancelAt:-1e9};
+function ttsPickVoice(){ if(!HAS_TTS) return; try{ const vs=speechSynthesis.getVoices()||[]; if(!vs.length) return;
+  TTS.voice=vs.find(v=>/^en[-_]US/i.test(v.lang)&&v.localService&&/Samantha|Aaron|Nicky|Alex|Evan|Nathan|Tom/i.test(v.name))||vs.find(v=>/^en[-_]US/i.test(v.lang)&&v.localService)||vs.find(v=>/^en[-_]US/i.test(v.lang))||vs.find(v=>/^en/i.test(v.lang))||null; }catch(e){} }
+if(HAS_TTS){ ttsPickVoice(); try{ speechSynthesis.addEventListener('voiceschanged',ttsPickVoice); }catch(e){ try{ speechSynthesis.onvoiceschanged=ttsPickVoice; }catch(_){} }
+  setInterval(()=>{ try{ if(speechSynthesis.paused) speechSynthesis.resume(); }catch(e){} },800); }
+function ttsCancel(){ if(!HAS_TTS) return; try{ if(speechSynthesis.speaking||speechSynthesis.pending||speechSynthesis.paused){ speechSynthesis.cancel(); TTS.cancelAt=performance.now(); } }catch(e){} }
+// o: {rate,pitch,volume,onend,onstart}. Returns the utterance (kept referenced until it ends).
+function ttsSpeak(text,o){ o=o||{}; if(!HAS_TTS||!text) return null;
+  let u; try{ u=new SpeechSynthesisUtterance(String(text).replace(/…/g,', ')); }catch(e){ return null; }
+  u.lang=(TTS.voice&&TTS.voice.lang)||'en-US'; if(TTS.voice) u.voice=TTS.voice; u.rate=o.rate||1.12; u.pitch=o.pitch||.9; u.volume=o.volume==null?1:o.volume;
+  const drop=()=>{ const i=TTS.keep.indexOf(u); if(i>=0) TTS.keep.splice(i,1); };
+  u.onstart=()=>{ TTS.started++; if(o.onstart) o.onstart(); };
+  u.onend=()=>{ TTS.ended++; drop(); if(o.onend) o.onend(); };
+  u.onerror=e=>{ TTS.errors++; TTS.lastErr=(e&&e.error)||'error'; drop(); if(o.onend) o.onend(); };
+  TTS.keep.push(u); if(TTS.keep.length>24) TTS.keep.shift();
+  const go=()=>{ try{ if(speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); TTS.n++; TTS.last=u.text; }catch(e){ TTS.errors++; TTS.lastErr=String(e&&e.message||e); } };
+  // Safari can swallow an utterance queued in the same tick as cancel(); give it a beat unless we're inside a tap
+  if(!o.now && performance.now()-TTS.cancelAt<60) setTimeout(go,60); else go();
+  return u;
 }
+// must run synchronously inside a tap handler: lets iOS allow later (timer-driven) speech
+function ttsPrime(){ if(!HAS_TTS||TTS.started) return; try{ if(speechSynthesis.speaking||speechSynthesis.pending) return; TTS.primed++; const u=new SpeechSynthesisUtterance(' '); u.volume=0; u.rate=2; u.lang='en-US'; TTS.keep.push(u); u.onend=u.onerror=()=>{ const i=TTS.keep.indexOf(u); if(i>=0) TTS.keep.splice(i,1); }; speechSynthesis.speak(u); }catch(e){} }
+function speak(text,urgent){ if(!HAS_TTS) return; if(urgent) ttsCancel(); ttsSpeak(text,{rate:urgent?1.3:1.12}); }
 
 /* ===== switcher state ===== */
 const st={
@@ -684,8 +710,8 @@ let talentVoiceOn=true;
 const TALENT={PBP:{pitch:1.0,rate:1.12},ANL:{pitch:.72,rate:1.05},SIDE:{pitch:1.35,rate:1.12},MC:{pitch:1.1,rate:1.2}};
 function talk(who,txt,busy){ say(who,txt,'tal');
   if(busy) G.talentBusy=Math.max(G.talentBusy,gt+busy);
-  if(!talentVoiceOn||BOT||!('speechSynthesis' in window)||Voice.busy==='call') return;
-  try{ const v=TALENT[who]||TALENT.PBP; const u=new SpeechSynthesisUtterance(txt.replace(/…/g,', ')); u.pitch=v.pitch; u.rate=v.rate; u.volume=.85; speechSynthesis.speak(u);}catch(e){} }
+  if(!talentVoiceOn||BOT||!HAS_TTS||Voice.busy==='call') return;
+  const v=TALENT[who]||TALENT.PBP; ttsSpeak(txt,{pitch:v.pitch,rate:v.rate,volume:.85}); }
 
 /* ---- crew: the director and TD carry out the producer's plan on the switcher ---- */
 function crewCut(src){ if(st.pgm===src&&!st.trans) return; st.trans=null; st.pgm=src; st.pst=nextPst(src); G.lastCut=gt; }
@@ -730,7 +756,7 @@ function mkEls(S,P){
 }
 function startShow(idx){
   const S=SHOWS[idx], P=PSHOW[S.id];
-  vStop(); if('speechSynthesis' in window) try{speechSynthesis.cancel();}catch(e){}
+  vStop();
   Object.assign(G,{mode:'running',showIdx:idx,show:S,P,sport:S.sport,R:rng(idx*977+13),clock:-30,lastGt:gt,max:{},got:{},pen:{},log:[],comms:[],
     mistakes:0,flash:null,talentBusy:0,l3:null,air:{kind:'game'},sel:0,rpl:null,statOffer:null,statQueued:null,statN:0,cb:null,cbFired:{},
     server:{mode:'ok',plays:0},micDown:0,micCover:'',thirtyAt:-99,wrapAt:-99,pendingScore:false,bbVersion:'ok',ended:false,endClock:null,
@@ -1290,14 +1316,24 @@ function renderWall(){
 const Voice={mode:'off',clips:{},tok:0,srcs:[],busy:null,log:[],gap:0.055};
 const VSR=24000;
 function vlog(type,id,extra){ Voice.log.push(Object.assign({t:+performance.now().toFixed(1),type,id},extra||{})); if(Voice.log.length>500) Voice.log.shift(); }
-function setVoiceMode(m){ Voice.mode=m; try{localStorage.setItem('tdchair.voiceMode',m);}catch(e){} const lab={off:'VOICE: OFF',synth:'VOICE: SYNTH',mine:'VOICE: MINE'}[m];
-  $('btnVoice').textContent=lab; $('btnVoice').classList.toggle('on',m!=='off'); const sel=$('optVoiceMode'); if(sel) sel.value=m; if(m!=='synth'&&'speechSynthesis' in window) speechSynthesis.cancel(); }
-function vStop(){ Voice.tok++; Voice.srcs.forEach(s=>{try{s.onended=null;s.stop();}catch(e){}}); Voice.srcs=[]; Voice.busy=null; if('speechSynthesis' in window){ try{speechSynthesis.cancel();}catch(e){} } }
+const VKEY='tdchair.voice2'; // new key: the old one stored an automatic 'off' on first load
+function vClipCount(){ return Object.keys(Voice.clips).length; }
+function setVoiceMode(m,user){ if(!['off','synth','mine'].includes(m)) m='synth'; Voice.mode=m; if(user){ try{localStorage.setItem(VKEY,m);}catch(e){} }
+  voiceLabel(); const sel=$('optVoiceMode'); if(sel) sel.value=m; if(m==='off') vStop(); }
+function voiceLabel(){ const m=Voice.mode, n=vClipCount(), b=$('btnVoice'); if(!b) return;
+  b.textContent=m==='off'?'🔇 VOICE: OFF':m==='synth'?'🔊 VOICE: SYNTH':(n?'🔊 VOICE: MINE':'🔊 VOICE: MINE→SYNTH');
+  b.title=m==='mine'&&!n?'No recorded clips on this site yet, so the synthesized voice is filling in. Import your voice pack or record in the Booth.':'Director voice: tap to switch Off / Synth / Mine';
+  b.classList.toggle('on',m!=='off'); b.classList.toggle('voff',m==='off'); vNotice(); }
+function vNotice(){ const el=$('vNotice'); if(!el) return; const n=vClipCount();
+  el.textContent=Voice.mode==='mine'&&!n?'No recorded clips on this site yet (clips stay with the web address they were recorded on). The synthesized voice fills in until you ⇧ IMPORT your voice pack or record in the Booth.':Voice.mode==='off'?'Director voice is OFF. Pick Synthesized or My voice to hear the calls.':'';
+  el.style.display=el.textContent?'block':'none'; }
+function vStop(){ Voice.tok++; Voice.srcs.forEach(s=>{try{s.onended=null;s.stop();}catch(e){}}); Voice.srcs=[]; Voice.busy=null; ttsCancel(); }
 function clipActOffset(id){ const c=Voice.clips[id]; if(!c) return null; return (LINE[id]&&LINE[id].pact==='last')?Math.max(0,c.dur-0.06):Math.min(c.dur,c.firstEnd||c.dur); }
 function ttsDur(text){ return 0.25+text.split(/\s+/).length*0.32; }
 // seconds from the start of the utterance to the end of its action word (only used in "mine" mode)
 function vEstimate(u){
   if(Voice.mode!=='mine'||!u) return 0;
+  if(!((u.phrase&&Voice.clips[u.phrase])||u.segs.some(id=>Voice.clips[id]))) return 0; // whole call goes to synth
   if(u.phrase&&Voice.clips[u.phrase]) return clipActOffset(u.phrase)||0;
   if(u.act<0) return 0; let t=0;
   for(let i=0;i<=u.act;i++){ const id=u.segs[i], c=Voice.clips[id]; t+=(c?c.dur:ttsDur(LINE[id].say))+(i<u.act?Voice.gap:0); }
@@ -1306,8 +1342,9 @@ function vEstimate(u){
 function vSay(u,o){
   o=o||{}; if(!u||Voice.mode==='off') return;
   if(o.kind==='react' && Voice.busy==='call') return;          // never talk over a live call
-  vStop(); Voice.busy=o.kind||'call';
-  if(Voice.mode==='synth'){ speak(u.disp,!!o.urgent); vlog('synth',u.disp); return; }
+  vStop(); Voice.busy=o.kind||'call'; const tok0=Voice.tok;
+  const hasClip=(u.phrase&&Voice.clips[u.phrase])||u.segs.some(id=>Voice.clips[id]);
+  if(Voice.mode==='synth'||!hasClip){ const k=o.kind||'call', clr=()=>{ if(tok0===Voice.tok&&Voice.busy===k) Voice.busy=null; }; ttsSpeak(u.disp,{rate:o.urgent?1.3:1.12,now:o.now,onend:clr}); setTimeout(clr,(ttsDur(u.disp)+1.2)*1000); vlog('synth',u.disp); if(o.onAction&&Voice.mode==='mine') setTimeout(()=>{ if(tok0===Voice.tok) o.onAction(); },0); return; }
   const tok=Voice.tok;
   let items;
   if(u.phrase&&Voice.clips[u.phrase]){ items=[{id:u.phrase,clip:Voice.clips[u.phrase],markAt:u.act>=0?clipActOffset(u.phrase):null}]; }
@@ -1330,7 +1367,7 @@ function vSay(u,o){
     } else {
       const text=LINE[it.id]?LINE[it.id].say:it.id; vlog('tts',it.id);
       let safety=setTimeout(fin,ttsDur(text)*1000+400);
-      if('speechSynthesis' in window){ try{ const ut=new SpeechSynthesisUtterance(text); ut.rate=1.25; ut.pitch=.9; ut.onend=()=>{clearTimeout(safety);fin();}; ut.onerror=()=>{clearTimeout(safety);fin();}; speechSynthesis.speak(ut);}catch(e){} }
+      ttsSpeak(text,{rate:1.25,onend:()=>{clearTimeout(safety);fin();}});
     }
   };
   next();
@@ -1471,7 +1508,7 @@ function boothBuild(){
 function boothRefresh(){
   const n=LINES.filter(l=>Voice.clips[l.id]).length, left=LINES.length-n;
   if($('bProg')) $('bProg').textContent=`${n} / ${LINES.length} lines recorded${left?` · about ${Math.max(1,Math.round(left*4/60))} min left`:' · complete'}`;
-  if($('vpCount')) $('vpCount').textContent=`Your voice pack: ${n} / ${LINES.length} lines`;
+  if($('vpCount')) $('vpCount').textContent=`Your voice pack: ${n} / ${LINES.length} lines`; voiceLabel();
   LINES.forEach(l=>{ const row=$('bl_'+l.id); if(!row) return; const c=Voice.clips[l.id];
     row.classList.toggle('has',!!c); row.classList.toggle('now',Booth.recId===l.id);
     row.querySelector('.bd').textContent=c?c.dur.toFixed(2)+'s':'—';
@@ -1483,7 +1520,7 @@ function boothRefresh(){
 function boothOpen(){ Booth.open=true; $('booth').classList.add('show'); if(G.mode==='running'){ paused=true; $('btnPause').classList.add('on'); } boothBuild(); meterLoop(); }
 function micOff(){ if(!Booth.stream) return; try{ Booth.stream.getTracks().forEach(t=>t.stop()); }catch(e){} Booth.stream=null; Booth.an=null; const b=$('bMic'); if(b){ b.textContent='ENABLE MIC'; b.classList.remove('on'); }
   if(navigator.audioSession){ try{ navigator.audioSession.type='playback'; }catch(e){} } }
-function boothClose(){ Booth.all=false; stopRec().then(micOff); Booth.open=false; $('booth').classList.remove('show'); if(Voice.mode==='off'&&Object.keys(Voice.clips).length) setVoiceMode('mine'); }
+function boothClose(){ Booth.all=false; stopRec().then(micOff); Booth.open=false; $('booth').classList.remove('show'); if(Voice.mode!=='mine'&&vClipCount()) setVoiceMode('mine',true); voiceLabel(); }
 function meterLoop(){ if(!Booth.open) return; const cv=$('bMeter'), c=cv.getContext('2d'); let lv=0;
   if(Booth.an){ const d=new Float32Array(Booth.an.fftSize); Booth.an.getFloatTimeDomainData(d); let s=0; for(let i=0;i<d.length;i++) s+=d[i]*d[i]; lv=Math.min(1,Math.sqrt(s/d.length)*5); }
   Booth.level=lv*0.6+(Booth.level||0)*0.4; c.fillStyle='#04161c'; c.fillRect(0,0,cv.width,cv.height);
@@ -1497,6 +1534,19 @@ function boothKey(e){
 function sampleCall(){ ac(); const m=Voice.mode; Voice.mode='mine'; vSay(U('ready_4',['ready','camera','n4'],-1),{kind:'call'}); const tok=Voice.tok;
   const wait=()=>{ if(Voice.busy&&tok===Voice.tok) return setTimeout(wait,50); setTimeout(()=>{ Voice.mode='mine'; vSay(U('takep_4',['take','n4'],0),{kind:'call',onAction:()=>boothMsg('▲ action point: scoring would start here')}); Voice.mode=m; },600); };
   Voice.mode=m; setTimeout(wait,50); }
+
+/* ---- boot-time voice preference + "Test voice" ---- */
+function vBootMode(){ let vm=null; try{ vm=localStorage.getItem(VKEY); }catch(e){}
+  const pref=vm; if(QS.get('voice')) vm=QS.get('voice'); else if(BOT) vm='off'; setVoiceMode(vm||'synth');
+  vLoadAll().then?.(()=>{ if(!pref&&!BOT&&!QS.get('voice')&&vClipCount()) setVoiceMode('mine'); }); }
+function voiceTest(){ // runs inside the tap, so iOS lets speech start
+  ac(); ttsCancel(); const before=TTS.started, m=Voice.mode;
+  if(m==='mine'&&vClipCount()){ vSay(U('takep_2',['take','n2'],0),{kind:'call',now:true}); }
+  else ttsSpeak(m==='off'?'Voice is off. Pick synthesized or my voice.':'Ready camera two. Take two.',{now:true});
+  const el=$('vNotice'); if(el){ el.style.display='block'; el.textContent='▶ Testing…'; }
+  setTimeout(()=>{ if(!el) return; const ok=TTS.started>before||(m==='mine'&&vClipCount());
+    el.textContent=ok?'✓ Voice is working. If you still hear nothing, turn the volume up and flip the ring/silent switch off.':(HAS_TTS?'✗ No speech started. Turn the volume up, switch the ring/silent switch off, and tap TEST VOICE again. On iPhone: Settings ▸ Accessibility ▸ Spoken Content ▸ Voices should have an English voice.':'✗ This browser has no speech synthesis.');
+  },1800); }
 /* ===== iPhone / touch support (shared by TD Chair and Producer's Chair) ===== */
 const MOB={touch:false,phone:false,portrait:false,autoPaused:false,hooks:{},unlocked:false,tts:false};
 MOB.touch=QS.get('touch')==='1'||!!(window.matchMedia&&matchMedia('(pointer:coarse)').matches);
@@ -1531,12 +1581,12 @@ function mobRotateCheck(){
 function mobUnlock(){
   const a=ac();
   if(a&&!MOB.unlocked){ try{ const bf=a.createBuffer(1,1,22050), s=a.createBufferSource(); s.buffer=bf; s.connect(a.destination); s.start(0); MOB.unlocked=true; }catch(e){} }
-  if(!MOB.tts&&'speechSynthesis' in window){ try{ const u=new SpeechSynthesisUtterance(' '); u.volume=0; u.rate=2; speechSynthesis.speak(u); MOB.tts=true; }catch(e){} }
+  ttsPrime(); MOB.tts=true;
   // Safari 17+: play through the ringer/silent switch like a game, unless the mic is open
   if(navigator.audioSession&&!(typeof Booth!=='undefined'&&Booth.stream)){ try{ if(navigator.audioSession.type!=='playback') navigator.audioSession.type='playback'; }catch(e){} }
 }
 function mobInit(){
-  ['pointerup','touchend','click','keydown'].forEach(t=>window.addEventListener(t,mobUnlock,{capture:true,passive:true}));
+  ['pointerdown','pointerup','touchend','click','keydown'].forEach(t=>window.addEventListener(t,mobUnlock,{capture:true,passive:true}));
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&AC&&AC.state!=='running'&&AC.state!=='closed') AC.resume().catch(()=>{}); });
   // no pinch-zoom, double-tap zoom, long-press menus or rubber-band scrolling on the game surface
   document.addEventListener('gesturestart',e=>e.preventDefault(),{passive:false});
@@ -1637,7 +1687,7 @@ onPressSel($('cbOpts'),'[data-c]',b=>act(()=>chooseCurve(+b.dataset.c))());
 onPress($('bSet'),doSet); onPress($('bGo'),doGo); onPress($('bDrop'),doDrop); onPress($('bNext'),()=>{ nextDue(); uiKey=''; });
 onPress($('bRoll'),act(rollReplay)); onPress($('bOut'),act(getOut));
 onPress($('i30'),act(ifb30)); onPress($('iWrap'),act(ifbWrap)); onPress($('iToss'),act(ifbToss)); onPress($('iCount'),act(ifbCount));
-function togglePause(){ if(G.mode!=='running') return; paused=!paused; $('btnPause').classList.toggle('on',paused); if(paused&&'speechSynthesis' in window) speechSynthesis.cancel(); }
+function togglePause(){ if(G.mode!=='running') return; paused=!paused; $('btnPause').classList.toggle('on',paused); if(paused) ttsCancel(); }
 function openHelp(){ $('help').classList.add('show'); if(G.mode==='running'&&!paused) togglePause(); }
 function closeHelp(){ $('help').classList.remove('show'); if(G.mode==='running'&&paused) togglePause(); }
 document.addEventListener('keydown',e=>{
@@ -1662,11 +1712,12 @@ const PDESC={hs:['ROOKIE','Two breaks, a forgiving pace, one lightning delay and
   pro:['NETWORK','Playoff pressure: three breaks, review, injury, booth mic failure, server crash, breaking score, and MC cutting you :45 short.']};
 function buildMenu(){
   $('showCards').innerHTML=SHOWS.map((s,i)=>{ const P=PSHOW[s.id]; const rt={hs:5,cbb:6,pro:6}[s.id]; return `<button class="showcard" data-i="${i}"><div class="lvl" style="color:${s.color}">${PDESC[s.id][0]}</div><h3>${s.title}</h3><p><b>${s.sub}</b> · ${s.away.n} @ ${s.home.n}</p><p>${PDESC[s.id][1]}</p><p style="color:#6c7889">${P.breaks.length} breaks · ${P.curve.length} curveballs · ${P.pers.join('/')} compressed · about ${rt}–${rt+1} min</p></button>`; }).join('');
-  document.querySelectorAll('.showcard').forEach(b=>b.addEventListener('click',()=>{ ac(); applyToggles(); $('menu').classList.remove('show'); startShow(+b.dataset.i); }));
+  document.querySelectorAll('.showcard').forEach(b=>b.addEventListener('click',()=>{ ac(); applyToggles(); if(Voice.mode!=='off'||talentVoiceOn){ ttsCancel(); ttsSpeak('Stand by.',{now:true}); } $('menu').classList.remove('show'); startShow(+b.dataset.i); }));
 }
-function applyToggles(){ setVoiceMode($('optVoiceMode').value); soundOn=$('optSound').checked; $('btnSound').classList.toggle('on',soundOn); talentVoiceOn=$('optTalent').checked; $('btnTalent').classList.toggle('on',talentVoiceOn); }
-$('btnVoice').onclick=()=>{ const order=['off','synth','mine']; setVoiceMode(order[(order.indexOf(Voice.mode)+1)%3]); };
-$('optVoiceMode').onchange=()=>setVoiceMode($('optVoiceMode').value);
+function applyToggles(){ setVoiceMode($('optVoiceMode').value,true); soundOn=$('optSound').checked; $('btnSound').classList.toggle('on',soundOn); talentVoiceOn=$('optTalent').checked; $('btnTalent').classList.toggle('on',talentVoiceOn); }
+$('btnVoice').onclick=()=>{ const order=['off','synth','mine']; setVoiceMode(order[(order.indexOf(Voice.mode)+1)%3],true); if(Voice.mode!=='off') ttsSpeak(Voice.mode==='synth'?'Synthesized voice.':'My voice.',{now:true}); };
+$('optTest').onclick=voiceTest;
+$('optVoiceMode').onchange=()=>setVoiceMode($('optVoiceMode').value,true);
 $('btnTalent').onclick=()=>{ talentVoiceOn=!talentVoiceOn; $('optTalent').checked=talentVoiceOn; $('btnTalent').classList.toggle('on',talentVoiceOn); if(!talentVoiceOn&&'speechSynthesis' in window) speechSynthesis.cancel(); };
 $('btnSound').onclick=()=>{ soundOn=!soundOn; $('optSound').checked=soundOn; $('btnSound').classList.toggle('on',soundOn); };
 $('btnPause').onclick=togglePause; $('btnHelp').onclick=openHelp; $('menuHelp').onclick=()=>$('help').classList.add('show'); $('helpClose').onclick=closeHelp;
@@ -1767,8 +1818,7 @@ buildMenu();
 MOB.hooks={running:()=>G.mode==='running', setPaused:v=>{ if(paused!==v) togglePause(); }};
 mobInit();
 if(MOB.touch){ const th=$('touchHelp'), f=document.querySelector('#help .box > p'); if(th&&f) f.after(th); }
-{ let vm='off'; try{ vm=localStorage.getItem('tdchair.voiceMode')||vm; }catch(e){} if(QS.get('voice')) vm=QS.get('voice'); else if(BOT) vm='off'; setVoiceMode(vm); }
-vLoadAll();
+vBootMode();
 requestAnimationFrame(frame);
 if(BOT){ $('optSound').checked=false; soundOn=false; talentVoiceOn=false; $('optTalent').checked=false; setTimeout(()=>{ $('menu').classList.remove('show'); startShow(+(QS.get('show')||0)); },200); }
 window.onShowStart=()=>{ G.botPlan=null; G.sel=0; uiKey=''; G._rh=G._sh=G._is=G._ck=null; };
